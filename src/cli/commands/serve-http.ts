@@ -578,13 +578,20 @@ export default defineCommand({
         const ext = pathModule.default.extname(filePath);
         res.writeHead(200, {
           'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-          'Cache-Control': 'no-cache',
+          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+          'Pragma': 'no-cache',
+          'Expires': '0',
         });
         res.end(data);
       } catch {
         try {
           const idx = await fsPromises.readFile(pathModule.default.join(dashStaticDir, 'index.html'));
-          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.writeHead(200, {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma': 'no-cache',
+            'Expires': '0',
+          });
           res.end(idx);
         } catch {
           res.writeHead(404); res.end('Not found');
@@ -949,6 +956,44 @@ export default defineCommand({
           });
 
           sendJson(overview);
+          return;
+        }
+
+        if (apiPath === '/knowledge-graph') {
+          const { projectId: kgProjectId, dataDir: kgDataDir } = await resolveRequestProject(url);
+          const { generateKnowledgeGraph } = await import('../../wiki/knowledge-graph.js');
+          const { initObservations, getAllObservations } = await import('../../memory/observations.js');
+          const { initMiniSkillStore, getMiniSkillStore } = await import('../../store/mini-skill-store.js');
+          const { initGraphStore, getGraphStore } = await import('../../store/graph-store.js');
+
+          await initObservations(kgDataDir);
+          await initMiniSkillStore(kgDataDir);
+          await initGraphStore(kgDataDir);
+
+          const allObs = getAllObservations();
+          const skills = await getMiniSkillStore().loadByProject(kgProjectId);
+
+          // Project-scope graph store (same logic as /api/graph)
+          const fullGraph = { entities: getGraphStore().loadEntities(), relations: getGraphStore().loadRelations() };
+          const graphObs = await loadDashboardObservations(kgDataDir) as Array<{ projectId?: string; entityName?: string; status?: string }>;
+          const projectEntityNames = new Set(
+            graphObs
+              .filter(o => o.projectId === kgProjectId && (o.status ?? 'active') === 'active' && o.entityName)
+              .map(o => o.entityName!)
+          );
+          const scopedEntities = fullGraph.entities.filter(e => projectEntityNames.has(e.name));
+          const scopedEntityNameSet = new Set(scopedEntities.map(e => e.name));
+          const scopedRelations = fullGraph.relations.filter(r => scopedEntityNameSet.has(r.from) && scopedEntityNameSet.has(r.to));
+
+          const graph = generateKnowledgeGraph({
+            projectId: kgProjectId,
+            observations: allObs,
+            miniSkills: skills,
+            graphEntities: scopedEntities,
+            graphRelations: scopedRelations,
+          });
+
+          sendJson(graph);
           return;
         }
 

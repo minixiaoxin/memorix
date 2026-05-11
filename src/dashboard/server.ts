@@ -397,6 +397,43 @@ async function handleApi(
                 break;
             }
 
+            case '/knowledge-graph': {
+                const { generateKnowledgeGraph } = await import('../wiki/knowledge-graph.js');
+                const { initObservations, getAllObservations } = await import('../memory/observations.js');
+                const { initMiniSkillStore, getMiniSkillStore } = await import('../store/mini-skill-store.js');
+                const { initGraphStore, getGraphStore } = await import('../store/graph-store.js');
+
+                await initObservations(effectiveDataDir);
+                await initMiniSkillStore(effectiveDataDir);
+                await initGraphStore(effectiveDataDir);
+
+                const allObs = getAllObservations();
+                const skills = await getMiniSkillStore().loadByProject(effectiveProjectId);
+
+                // Project-scope graph store (same logic as /api/graph)
+                const fullGraph = { entities: getGraphStore().loadEntities(), relations: getGraphStore().loadRelations() };
+                const graphObs = await getObservationStore().loadAll() as Array<{ projectId?: string; entityName?: string; status?: string }>;
+                const projectEntityNames = new Set(
+                    graphObs
+                        .filter(o => o.projectId === effectiveProjectId && (o.status ?? 'active') === 'active' && o.entityName)
+                        .map(o => o.entityName!),
+                );
+                const scopedEntities = fullGraph.entities.filter((e: any) => projectEntityNames.has(e.name));
+                const scopedEntityNameSet = new Set(scopedEntities.map((e: any) => e.name));
+                const scopedRelations = fullGraph.relations.filter((r: any) => scopedEntityNameSet.has(r.from) && scopedEntityNameSet.has(r.to));
+
+                const graph = generateKnowledgeGraph({
+                    projectId: effectiveProjectId,
+                    observations: allObs,
+                    miniSkills: skills,
+                    graphEntities: scopedEntities,
+                    graphRelations: scopedRelations,
+                });
+
+                sendJson(res, graph);
+                break;
+            }
+
             case '/config': {
                 // Config provenance — shows where each config value comes from
                 const os = await import('node:os');
@@ -689,14 +726,21 @@ async function serveStatic(req: IncomingMessage, res: ServerResponse, staticDir:
         const ext = path.extname(filePath);
         res.writeHead(200, {
             'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
-            'Cache-Control': 'no-cache',
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma': 'no-cache',
+            'Expires': '0',
         });
         res.end(data);
     } catch {
         // Fallback to index.html for SPA routing
         try {
             const indexData = await fs.readFile(path.join(staticDir, 'index.html'));
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.writeHead(200, {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            });
             res.end(indexData);
         } catch {
             sendError(res, 'Not found', 404);

@@ -4,6 +4,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>Memorix — Memory Control Plane</title>
   <link rel="stylesheet" href="/style.css">
   <script src="https://code.iconify.design/3/3.1.0/iconify.min.js"></script>
@@ -179,11 +182,20 @@
     <div id="page-team" class="page"></div>
   </main>
 
-  <!-- Cytoscape.js + Dagre layout for topology graph -->
+  <!-- Apache ECharts 5 — Knowledge Graph renderer -->
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+  <!-- Cytoscape.js + Dagre — legacy entity-graph fallback -->
   <script src="https://unpkg.com/cytoscape@3.30.4/dist/cytoscape.min.js"></script>
   <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
   <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
-  <script src="/app.js"></script>
+  <script>
+    // Cache-bust app.js by appending mtime-based version so edits always hit the browser.
+    (function () {
+      var s = document.createElement('script');
+      s.src = '/app.js?v=' + Date.now();
+      document.body.appendChild(s);
+    })();
+  </script>
 </body>
 
 </html>

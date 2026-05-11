@@ -671,6 +671,8 @@ body {
 .graph-layout {
   display: flex;
   gap: 0;
+  flex: 1 1 auto;
+  min-height: 0;
   height: calc(100vh - 140px);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
@@ -881,6 +883,8 @@ body {
 #cytoscape-mount {
   flex: 1;
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .graph-status-bar {
@@ -1081,6 +1085,48 @@ body {
 
 .gi-rel-target:hover {
   color: var(--accent-purple);
+}
+
+/* ── Knowledge Graph Page Shell ──────────────────────────── */
+.kg-page-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.kg-page-shell .page-header {
+  flex-shrink: 0;
+  padding: 16px 20px 8px;
+}
+
+.kg-page-shell .graph-layout {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 768px) {
+  .kg-page-shell .graph-layout {
+    flex-direction: column;
+    height: auto;
+    min-height: 60vh;
+  }
+  .kg-page-shell .graph-filter-panel {
+    width: 100% !important;
+    max-height: 180px;
+    border-right: none;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+  }
+  .kg-page-shell .graph-inspector {
+    width: 100% !important;
+    max-height: 200px;
+    border-left: none;
+    border-top: 1px solid var(--border-subtle);
+  }
+  .kg-page-shell #graph-container {
+    min-height: 300px;
+  }
 }
 
 /* ── Graph Tooltip ────────────────────────────────────────── */
@@ -2706,7 +2752,8 @@ mark {
   color: var(--accent-green);
 }
 
-#page-knowledge.page.active {
+#page-knowledge.page.active,
+#page-graph.page.active {
   display: flex;
   flex-direction: column;
   height: 100%;
@@ -3187,7 +3234,8 @@ mark {
 }
 
 @media (max-width: 900px) {
-  #page-knowledge.page.active {
+  #page-knowledge.page.active,
+  #page-graph.page.active {
     height: auto;
     min-height: 100vh;
     overflow: visible;
@@ -3240,7 +3288,8 @@ mark {
 }
 
 @media (max-width: 600px) {
-  #page-knowledge.page.active {
+  #page-knowledge.page.active,
+  #page-graph.page.active {
     padding: 14px 12px;
   }
 
