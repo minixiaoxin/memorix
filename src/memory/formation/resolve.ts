@@ -81,6 +81,17 @@ function hasContradiction(oldText: string, newText: string): boolean {
 }
 
 /**
+ * Search backends return ranking scores, not guaranteed semantic similarity.
+ * Treat only explicit 0..1 scores as normalized similarity; raw BM25/Orama
+ * scores above 1 are useful for ordering but unsafe for duplicate thresholds.
+ */
+function normalizedSearchSimilarity(score: number): number {
+  if (!Number.isFinite(score) || score <= 0) return 0;
+  if (score <= 1) return score;
+  return 0;
+}
+
+/**
  * Merge two narratives, keeping the most comprehensive version.
  */
 function mergeNarratives(oldNarrative: string, newNarrative: string): string {
@@ -217,15 +228,16 @@ ${existingMemories.map(m => `[ID:${m.id}] ${m.title} | ${m.content} | Facts: ${m
 function scoreCandidate(
   extracted: ExtractResult,
   candidate: SearchHit,
-): { score: number; entityMatch: boolean; richer: boolean; contradiction: boolean } {
+): { score: number; searchSimilarity: number; entityMatch: boolean; richer: boolean; contradiction: boolean } {
   const entityMatch = entitiesMatch(extracted.entityName, candidate.entityName);
   const contentOverlap = wordOverlap(
     `${extracted.title} ${extracted.narrative}`,
     `${candidate.title} ${candidate.narrative}`,
   );
+  const searchSimilarity = normalizedSearchSimilarity(candidate.score);
 
   // Composite score: search similarity + entity match bonus + content overlap
-  const score = candidate.score * 0.6
+  const score = searchSimilarity * 0.6
     + (entityMatch ? 0.2 : 0)
     + contentOverlap * 0.2;
 
@@ -236,7 +248,7 @@ function scoreCandidate(
 
   const contradiction = hasContradiction(candidate.narrative, extracted.narrative);
 
-  return { score, entityMatch, richer, contradiction };
+  return { score, searchSimilarity, entityMatch, richer, contradiction };
 }
 
 /**
@@ -285,8 +297,9 @@ export async function runResolve(
 
   // ── Decision logic ──
 
-  // Very high raw search similarity → likely duplicate (use raw score, not composite)
-  if (best.hit.score >= SIMILARITY_DUPLICATE) {
+  // Very high normalized search similarity → likely duplicate.
+  // Raw backend ranking scores must not be compared to 0..1 thresholds.
+  if (best.searchSimilarity >= SIMILARITY_DUPLICATE) {
     if (best.richer) {
       // New is richer → evolve (supersede)
       const existing = getObservation(best.hit.observationId);

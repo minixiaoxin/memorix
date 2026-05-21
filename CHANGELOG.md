@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - **Session semantics preserved** -- `session_start` remains explicit and lightweight. Agent Team join remains opt-in.
 
 ### Fixed
+- **Formation duplicate detection (#94)** -- Fixed Formation resolve comparing raw Orama/BM25 ranking scores against normalized similarity thresholds. Noisy log-dump memories with high backend scores no longer discard unrelated valid memories as duplicates.
 - **TUI chat input lock** -- Fixed a regression where after a free-text chat response the bottom input bar became unresponsive because the chat overlay disabled the CommandBar. Chat overlay now keeps input active so users can continue the conversation.
 - **TUI shortcut/input conflicts** -- Fixed CommandBar conflicts with view shortcuts such as Graph `f`/`k`, Memory `k`, and Knowledge `m` while still allowing normal first-character input.
 - **Graph TypeScript build issue** -- Fixed a type-only re-export under `verbatimModuleSyntax`.
