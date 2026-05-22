@@ -25,6 +25,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **Formation duplicate detection (#94)** -- Fixed Formation resolve comparing raw Orama/BM25 ranking scores against normalized similarity thresholds. Noisy log-dump memories with high backend scores no longer discard unrelated valid memories as duplicates.
 - **TUI chat input lock** -- Fixed a regression where after a free-text chat response the bottom input bar became unresponsive because the chat overlay disabled the CommandBar. Chat overlay now keeps input active so users can continue the conversation.
+- **TUI read-only overlay input lock** -- Fixed read-only overlays such as `/doctor` disabling the CommandBar. Users can now keep typing commands or questions while diagnostics and other non-action views are open.
 - **TUI shortcut/input conflicts** -- Fixed CommandBar conflicts with view shortcuts such as Graph `f`/`k`, Memory `k`, and Knowledge `m` while still allowing normal first-character input.
 - **Graph TypeScript build issue** -- Fixed a type-only re-export under `verbatimModuleSyntax`.
 
@@ -33,7 +34,7 @@ All notable changes to this project will be documented in this file.
 - 1.0.9 does not include a desktop app, realtime agent messaging layer, GraphRAG system, graph editing, or full coding-agent harness.
 
 ### Stats
-- **Verified TUI subset:** 93 passing tests across `interaction`, `workbench`, and `graph` suites.
+- **Verified TUI subset:** 95 passing tests across `interaction`, `workbench`, and `graph` suites.
 - **Release gates run during cleanup:** `npm run lint`, `npm run build`, and full `npm test`.
 
 ## [1.0.8] - 2026-04-19
