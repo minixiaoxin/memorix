@@ -125,6 +125,8 @@ Memorix 使用两类文件：
 
 在终端中直接运行 `memorix`（不带参数）即可打开交互式全屏 TUI（需要 TTY）。它适合用于项目记忆问答、搜索、快速存储、诊断、后台服务控制、Dashboard 打开和 IDE 配置。进入 TUI 后用 `/help` 查看当前命令列表。
 
+在 1.0.9 中，TUI 已整理成知识工作台：`Home`、`Knowledge`、`Memory`、`Workbench`、`Graph` 五个 tab。它可以浏览生成的 Knowledge Base、查看记忆详情、在 wiki refs 和源 observation 之间跳转、查看文本化 Knowledge Graph，并且在回答结束后继续保持输入可用。
+
 单次聊天（不进 TUI）：`memorix ask "your question"`。
 
 ### Operator CLI
@@ -426,6 +428,20 @@ Memorix 不是一条单线流水线。它从多个入口接收记忆，把内容
 - [AI Context Note](docs/AI_CONTEXT.md)
 - [`llms.txt`](llms.txt)
 - [`llms-full.txt`](llms-full.txt)
+
+---
+
+## 1.0.9 更新亮点
+
+`1.0.9` 增加了第一版可读项目知识层，并把终端 UI 收束为 knowledge-native workbench。
+
+- **Knowledge Base / LLM Wiki**：Memorix 现在可以从 durable observations、Git facts、mini-skills 和项目证据生成可读的 Knowledge Base。Raw memory 仍是事实来源；Knowledge Base 是给人和 agent 使用的可引用综合层。
+- **Semantic Knowledge Graph**：基于同一批 eligible knowledge inputs 生成语义图谱投影，保留 source refs，支持围绕概念、模块和决策探索，但不把它包装成 GraphRAG。
+- **Tabbed TUI Workbench**：`Home`、`Knowledge`、`Memory`、`Workbench`、`Graph` 五个 tab 替代旧的分散视图模型。
+- **跨引用导航**：可通过稳定 refs 在 Knowledge item、Memory detail 和 Graph node 之间跳转。
+- **显式 Session Center**：Workbench 展示 session 状态和上下文来源，bind/end 都是显式动作；进入 tab 不会自动 start session，也不会自动 join Agent Team。
+- **TUI Chat 可用性修复**：assistant 回复后输入框保持可用；Graph/Memory/Knowledge 的视图快捷键不再吞掉正常 CommandBar 输入。
+- **架构边界**：desktop app、realtime agent messaging、完整 coding-agent harness、graph editing 和 GraphRAG 都不属于 1.0.9 范围。
 
 ---
 
