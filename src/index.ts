@@ -19,8 +19,9 @@ async function main(): Promise<void> {
   const { homedir } = await import('node:os');
   const { existsSync, readFileSync } = await import('node:fs');
   const path = await import('node:path');
-  const { detectProject, findGitInSubdirs, isSystemDirectory } = await import('./project/detector.js');
+  const { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists } = await import('./project/detector.js');
   const { resolveServeProject } = await import('./cli/commands/serve-shared.js');
+  const { getProjectConfig } = await import('./config.js');
 
   let safeCwd: string;
   try { safeCwd = process.cwd(); } catch { safeCwd = homedir(); }
@@ -36,13 +37,16 @@ async function main(): Promise<void> {
     } catch { /* ignore */ }
   }
 
+  const projectConfig = getProjectConfig();
+
   const resolution = resolveServeProject(
     {
       processCwd: safeCwd,
       homeDir: homedir(),
       lastKnownProjectRoot,
     },
-    { detectProject, findGitInSubdirs, isSystemDirectory },
+    { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists },
+    projectConfig,
   );
 
   for (const message of resolution.messages) {

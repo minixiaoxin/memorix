@@ -170,6 +170,11 @@ export function getEmbeddingDimensions(): number | null {
 
 // ─── YAML-specific getters (new config sections) ────────────────────
 
+/** Project identity config */
+export function getProjectConfig(): NonNullable<MemorixYamlConfig['project']> {
+  return loadYamlConfig().project ?? {};
+}
+
 /** Git-Memory pipeline config */
 export function getGitConfig(): NonNullable<MemorixYamlConfig['git']> {
   return loadYamlConfig().git ?? {};

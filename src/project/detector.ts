@@ -1,13 +1,15 @@
 /**
  * Project Detector
  *
- * Strict .git-based project detection.
- * No .git = not a project. No fallbacks, no accommodations.
+ * Flexible project detection with directory-based identity.
  *
- * ID strategy:
- *   - .git + remote → normalizeGitRemote(remote)  (globally unique, e.g. "user/repo")
- *   - .git + no remote → "local/<dirname>"         (local git repo, no remote yet)
- *   - no .git → null                               (not a project)
+ * ID strategy (revised for flexibility):
+ *   1. Config override (memorix.yml → project.id) → "local/<config-id>"
+ *   2. Directory name at workspace root → "local/<dirname>"
+ *   3. Fallback to null if fallbackToPath=false
+ *
+ * Git remote is stored separately for git memory features (optional).
+ * This ensures project identity binds to user's workspace, not child repos.
  */
 
 import { execSync } from 'node:child_process';
@@ -15,21 +17,37 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { ProjectInfo, DetectionResult, DetectionFailure } from '../types.js';
 
+/** Configuration options for project detection */
+export interface ProjectConfigOptions {
+  /** Manually specify projectId (overrides auto-detection) */
+  manualId?: string;
+  /** Whether to scan subdirectories for git repo when root has no .git (default: false) */
+  scanSubdirs?: boolean;
+  /** Whether to use path-based projectId when no git repo found (default: true) */
+  fallbackToPath?: boolean;
+}
+
 /**
- * Detect the current project identity from Git.
- * Returns null if no .git directory is found — caller must handle this.
+ * Detect the current project identity.
+ * Uses directory-based identity by default.
  * @param cwd - Working directory to detect from (defaults to process.cwd())
+ * @param config - Optional configuration for detection behavior
  */
-export function detectProject(cwd?: string): ProjectInfo | null {
-  return detectProjectWithDiagnostics(cwd).project;
+export function detectProject(cwd?: string, config?: ProjectConfigOptions): ProjectInfo | null {
+  return detectProjectWithDiagnostics(cwd, config).project;
 }
 
 /**
  * Detect project with full diagnostic info.
- * Returns both the project (if found) and a failure descriptor (if not).
- * Callers can use failure.reason to produce actionable error messages.
+ *
+ * ID priority:
+ *   1. Config override (config.manualId) → "local/<manualId>"
+ *   2. Directory name at workspace root → "local/<dirname>"
+ *   3. null if fallbackToPath=false and no git
+ *
+ * Git remote is detected separately and stored for git memory features.
  */
-export function detectProjectWithDiagnostics(cwd?: string): DetectionResult {
+export function detectProjectWithDiagnostics(cwd?: string, config?: ProjectConfigOptions): DetectionResult {
   const basePath = cwd ?? process.cwd();
 
   // Check: does the path exist?
@@ -55,32 +73,58 @@ export function detectProjectWithDiagnostics(cwd?: string): DetectionResult {
     };
   }
 
-  // Check: git root
-  const gitRootResult = getGitRootWithDiagnostics(basePath);
-  if (!gitRootResult.root) {
+  const dirName = path.basename(basePath);
+  const fallbackToPath = config?.fallbackToPath !== false; // Default true
+
+  // 1. Check for manual override in config
+  if (config?.manualId) {
+    const id = `local/${config.manualId}`;
+    const gitRemote = getGitRemoteIfExists(basePath);
     return {
-      project: null,
-      failure: gitRootResult.failure ?? {
-        reason: 'no_git',
-        path: basePath,
-        detail: `No .git directory found in "${basePath}" or any parent directory.`,
-      },
+      project: { id, name: config.manualId, rootPath: basePath, gitRemote: gitRemote ?? undefined },
+      failure: null,
     };
   }
 
-  const gitRoot = gitRootResult.root;
-  const gitRemote = getGitRemote(gitRoot);
+  // 2. Try to detect git info (optional, for git memory)
+  const gitRootResult = getGitRootWithDiagnostics(basePath);
+  const gitRemote = gitRootResult.root ? getGitRemote(gitRootResult.root) : null;
 
-  if (gitRemote) {
-    const id = normalizeGitRemote(gitRemote);
-    const name = id.split('/').pop() ?? path.basename(gitRoot);
-    return { project: { id, name, gitRemote, rootPath: gitRoot }, failure: null };
+  // 3. If git root found and it's NOT the workspace root, we have a child/subdirectory git
+  //    Still use workspace root directory name as projectId, git is just for git memory
+  if (gitRootResult.root && gitRootResult.root !== basePath) {
+    // Git found in parent or child - still bind to workspace root
+    return {
+      project: { id: `local/${dirName}`, name: dirName, rootPath: basePath, gitRemote: gitRemote ?? undefined },
+      failure: null,
+    };
   }
 
-  // Git repo without remote — local-only project
-  const name = path.basename(gitRoot);
-  const id = `local/${name}`;
-  return { project: { id, name, rootPath: gitRoot }, failure: null };
+  // 4. Git found at workspace root - use directory name, store git remote for git memory
+  if (gitRootResult.root) {
+    return {
+      project: { id: `local/${dirName}`, name: dirName, rootPath: basePath, gitRemote: gitRemote ?? undefined },
+      failure: null,
+    };
+  }
+
+  // 5. No git found - use directory name if fallbackToPath is true
+  if (fallbackToPath) {
+    return {
+      project: { id: `local/${dirName}`, name: dirName, rootPath: basePath },
+      failure: null,
+    };
+  }
+
+  // 6. No git and fallbackToPath=false - fail closed
+  return {
+    project: null,
+    failure: {
+      reason: 'no_git',
+      path: basePath,
+      detail: `No .git directory found in "${basePath}" and fallbackToPath is disabled.`,
+    },
+  };
 }
 
 /**
@@ -148,6 +192,15 @@ function getGitRootWithDiagnostics(cwd: string): { root: string | null; failure:
       failure: { reason: 'no_git', path: cwd, detail: `No git repository found at "${cwd}" or any parent directory.` },
     };
   }
+}
+
+/**
+ * Get the Git remote URL for the given directory (wrapper that never throws).
+ * Returns null if not a git repository or no remote configured.
+ * Use this when you want optional git info without affecting the main detection logic.
+ */
+export function getGitRemoteIfExists(cwd: string): string | null {
+  return getGitRemote(cwd);
 }
 
 /**

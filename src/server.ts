@@ -31,6 +31,7 @@ import { createAutoRelations } from './memory/auto-relations.js';
 import { extractEntities } from './memory/entity-extractor.js';
 import { compactSearch, compactTimeline, compactDetail } from './compact/engine.js';
 import { detectProject } from './project/detector.js';
+import { getProjectConfig } from './config.js';
 import { registerAlias, initAliasRegistry, resolveAliases, autoMergeByBaseName } from './project/aliases.js';
 import { getProjectDataDir } from './store/persistence.js';
 import type { ObservationType, RuleSource, AgentTarget, MCPServerEntry } from './types.js';
@@ -196,10 +197,17 @@ export async function createMemorixServer(
   switchProject: (newCwd: string) => Promise<boolean>;
   isExplicitlyBound: () => boolean;
 }> {
-  // Detect current project — strict .git-based detection
+  // Detect current project — flexible directory-based detection
   const allowUntrackedFallback = options.allowUntrackedFallback ?? true;
   const deferProjectInitUntilBound = options.deferProjectInitUntilBound ?? false;
-  const detectedProject = detectProject(cwd);
+
+  // Load project config for detection behavior
+  const projectConfig = getProjectConfig();
+  const detectedProject = detectProject(cwd, {
+    manualId: projectConfig.id,
+    scanSubdirs: projectConfig.scanSubdirs,
+    fallbackToPath: projectConfig.fallbackToPath,
+  });
   let rawProject: import('./types.js').ProjectInfo;
   let projectResolved = true;
   let projectResolutionError: string | null = null;
@@ -211,16 +219,16 @@ export async function createMemorixServer(
     const name = (await import('node:path')).basename(basePath) || 'unknown';
     projectResolved = false;
     projectResolutionError =
-      `No git project could be resolved from "${basePath}". ` +
-      'This client did not provide a usable workspace root, so project-scoped tools are disabled until a git-backed project is detected.';
+      `No project could be resolved from "${basePath}". ` +
+      'This client did not provide a usable workspace root. ' +
+      'Set project.fallbackToPath=true in memorix.yml to enable non-git project support.';
     rawProject = allowUntrackedFallback
-      ? { id: `untracked/${name}`, name, rootPath: basePath }
+      ? { id: `local/${name}`, name, rootPath: basePath }
       : { id: '__unresolved__', name, rootPath: basePath };
     if (!allowUntrackedFallback && !deferProjectInitUntilBound) {
       console.error(`[memorix] WARNING: ${projectResolutionError}`);
     } else if (allowUntrackedFallback) {
-      console.error(`[memorix] WARNING: No .git found in "${basePath}" - project isolation degraded`);
-      console.error(`[memorix] Run "git init" in your project for proper isolation.`);
+      console.error(`[memorix] Project bound to workspace directory: "${basePath}"`);
     }
   }
 
@@ -2605,7 +2613,8 @@ export async function createMemorixServer(
       if (explicitRoot && typeof explicitRoot === 'string') {
         let bound = await switchProject(explicitRoot);
         // Fallback: workspace root may contain a git project in a subdirectory
-        if (!bound) {
+        // Only scan subdirs if configured
+        if (!bound && getProjectConfig().scanSubdirs) {
           const { findGitInSubdirs } = await import('./project/detector.js');
           const subGit = findGitInSubdirs(explicitRoot);
           if (subGit) {
@@ -2617,7 +2626,12 @@ export async function createMemorixServer(
         // We must NOT treat "different valid repo at a different path" as a no-op success.
         if (!bound && projectResolved) {
           const { detectProjectWithDiagnostics: diagnose } = await import('./project/detector.js');
-          const diag = diagnose(explicitRoot);
+          const config = getProjectConfig();
+          const diag = diagnose(explicitRoot, {
+            manualId: config.id,
+            scanSubdirs: config.scanSubdirs,
+            fallbackToPath: config.fallbackToPath,
+          });
           if (diag.project) {
             const { registerAlias: regAlias } = await import('./project/aliases.js');
             const resolvedCanonical = await regAlias(diag.project);
@@ -2629,28 +2643,39 @@ export async function createMemorixServer(
           }
         }
         if (!bound) {
-          // Explicit projectRoot was provided but no git repo found.
-          // ALWAYS fail closed — never silently fall back to a previously bound project.
+          // Explicit projectRoot was provided but detection failed.
+          // Check if fallback is enabled
+          const config = getProjectConfig();
           const { detectProjectWithDiagnostics: diagnose } = await import('./project/detector.js');
-          const diag = diagnose(explicitRoot);
-          const failureDetail = diag.failure
-            ? `\nDiagnostic: [${diag.failure.reason}] ${diag.failure.detail}`
-            : '';
-          const hint = projectResolved
-            ? `The session was previously bound to "${project.name}" (${project.id}), but the explicitly requested path has no git repo. Refusing to silently reuse the old binding.`
-            : 'No project is currently bound to this session.';
-          return {
-            content: [{
-              type: 'text' as const,
-              text:
-                `Cannot bind session to project.\n` +
-                `No git repository found at "${explicitRoot}".${failureDetail}\n` +
-                `${hint}\n\n` +
-                'Ensure the path points to a directory containing a .git folder (or a subdirectory of one). ' +
-                'Run "git init" in your project root if needed.',
-            }],
-            isError: true as const,
-          };
+          const diag = diagnose(explicitRoot, {
+            manualId: config.id,
+            scanSubdirs: config.scanSubdirs,
+            fallbackToPath: config.fallbackToPath,
+          });
+          if (diag.project) {
+            // With new flexible detection, this should succeed
+            bound = await switchProject(explicitRoot);
+          }
+          if (!bound) {
+            const failureDetail = diag.failure
+              ? `\nDiagnostic: [${diag.failure.reason}] ${diag.failure.detail}`
+              : '';
+            const hint = projectResolved
+              ? `The session was previously bound to "${project.name}" (${project.id}), but the explicitly requested path could not be bound.`
+              : 'No project is currently bound to this session.';
+            return {
+              content: [{
+                type: 'text' as const,
+                text:
+                  `Cannot bind session to project.\n` +
+                  `Path: "${explicitRoot}".${failureDetail}\n` +
+                  `${hint}\n\n` +
+                  'Ensure the path points to a valid directory. ' +
+                  'Set project.fallbackToPath=true in memorix.yml for non-git project support.',
+              }],
+              isError: true as const,
+            };
+          }
         }
         // Bound successfully — mark as explicitly bound so roots won't override
         explicitProjectBound = true;
@@ -3544,7 +3569,12 @@ export async function createMemorixServer(
   // Updates all mutable state; tool closures automatically pick up new values.
   const switchProject = async (newCwd: string): Promise<boolean> => {
     const { detectProjectWithDiagnostics } = await import('./project/detector.js');
-    const result = detectProjectWithDiagnostics(newCwd);
+    const config = getProjectConfig();
+    const result = detectProjectWithDiagnostics(newCwd, {
+      manualId: config.id,
+      scanSubdirs: config.scanSubdirs,
+      fallbackToPath: config.fallbackToPath,
+    });
     if (!result.project) {
       if (result.failure) {
         console.error(`[memorix] Project detection failed for "${newCwd}": [${result.failure.reason}] ${result.failure.detail}`);

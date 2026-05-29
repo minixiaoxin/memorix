@@ -39,6 +39,16 @@ export interface MemorixYamlConfig {
     dimensions?: number;
   };
 
+  /** Project identity configuration */
+  project?: {
+    /** Manually specify projectId (overrides auto-detection, e.g., "my-project" → "local/my-project") */
+    id?: string;
+    /** Whether to scan subdirectories for git repo when root has no .git (default: false) */
+    scanSubdirs?: boolean;
+    /** Whether to use path-based projectId when no git repo found (default: true) */
+    fallbackToPath?: boolean;
+  };
+
   /** Git-Memory pipeline configuration */
   git?: {
     /** Auto-install post-commit hook on first run (default: false) */
@@ -162,6 +172,7 @@ export function loadYamlConfig(projectRoot?: string | null): MemorixYamlConfig {
     // Deep merge for nested objects where both exist
     llm: { ...userConfig.llm, ...projectConfig.llm },
     embedding: { ...userConfig.embedding, ...projectConfig.embedding },
+    project: { ...userConfig.project, ...projectConfig.project },
     git: { ...userConfig.git, ...projectConfig.git },
     behavior: { ...userConfig.behavior, ...projectConfig.behavior },
     server: { ...userConfig.server, ...projectConfig.server },

@@ -14,6 +14,24 @@
 #
 # Docs: https://github.com/AVIDS2/memorix
 
+# ── Project Identity Configuration ─────────────────────────────
+# Control how Memorix identifies your project.
+# By default, Memorix uses the workspace root directory name as projectId.
+project:
+  # Manually specify projectId (overrides auto-detection)
+  # Example: "my-project" → projectId becomes "local/my-project"
+  # id: "my-project-name"
+
+  # Whether to scan subdirectories for git repo when root has no .git
+  # Default: false - prevents binding to wrong child repo
+  # Set to true if you want git memory from a subdirectory repo
+  scanSubdirs: false
+
+  # Whether to use directory name as projectId when no git repo found
+  # Default: true - enables non-git project support
+  # Set to false to require git for project binding (fail closed)
+  fallbackToPath: true
+
 # ── LLM Configuration ────────────────────────────────────────
 # Used for smart dedup, fact extraction, and memory formation.
 # Optional — Memorix works without LLM (free heuristic mode).

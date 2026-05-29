@@ -1,0 +1,1390 @@
+diff --git a/docs/PROJECT_IDENTITY_FLEXIBILITY.md b/docs/PROJECT_IDENTITY_FLEXIBILITY.md
+new file mode 100644
+index 0000000..59eeb0d
+--- /dev/null
++++ b/docs/PROJECT_IDENTITY_FLEXIBILITY.md
+@@ -0,0 +1,352 @@
++# Project Identity Flexibility - Design Proposal
++
++> Author: minixiaoxin
++> Date: 2026-04-08
++> Status: **Implemented**
++
++## 1. Problem Statement
++
++### Current Behavior
++
++Memorix currently enforces a strict Git-based project identity model:
++
++```typescript
++// detector.ts:11-14 (comments)
++// ID strategy:
++//   - .git + remote → normalizeGitRemote(remote)  (globally unique, e.g. "user/repo")
++//   - .git + no remote → "local/<dirname>"         (local git repo, no remote yet)
++//   - no .git → null                               (not a project)
++```
++
++### Problem Scenarios
++
++| Scenario | Current Behavior | Expected Behavior |
++|----------|-----------------|-------------------|
++| Non-git project folder | `null` (no project binding) | Should bind to directory name |
++| Project with git submodule/child | Wrongly binds to child repo | Should bind to user's workspace root |
++| Git project without remote | `local/<dirname>` | Should work correctly (already OK) |
++
++### User's Core Requirements
++
++1. **Project ID should bind to the AI tool's root directory name** - regardless of git status
++2. **Memory search priority**: project scope first, then global scope
++3. **Git history capture must remain functional** - when git exists, still capture commits
++
++## 2. Design Goals
++
++### Primary Goals
++
++1. **Directory-based project identity**: The project ID should derive from the workspace root directory name, not git remote
++2. **Git-independence**: Projects without `.git` should still have valid project IDs
++3. **Git coexistence**: When git exists, git memory features should remain fully functional
++
++### Secondary Goals
++
++1. **Configuration flexibility**: Allow manual override of project ID via config
++2. **Subdirectory scan control**: Disable by default, enable via config if needed
++3. **Backward compatibility**: Existing git-based projects should work unchanged
++4. **Clear scope hierarchy**: Project scope → Global scope
++
++## 3. Proposed Solution
++
++### 3.1 Configuration Schema Extension
++
++Add a new `project` section to `memorix.yml`:
++
++```yaml
++# memorix.yml
++
++project:
++  # Manually specify projectId (overrides auto-detection)
++  # Example: "my-project" → projectId = "local/my-project"
++  id: "my-project-name"
++
++  # Whether to scan subdirectories for git repo when root has no .git
++  # Default: false (NEW - prevents binding to wrong child repo)
++  scanSubdirs: false
++
++  # Whether to use directory name as projectId when no git repo found
++  # Default: true (NEW - enables non-git project support)
++  fallbackToPath: true
++```
++
++### 3.2 Project ID Strategy (Revised)
++
++```
++Detection Flow:
++1. Check memorix.yml → project.id (manual override, highest priority)
++2. Check .git at workspace root → use directory name as projectId
++   - If git remote exists → store for git memory features ONLY
++3. If no .git and fallbackToPath=true → "local/<dirname>"
++4. If no .git and fallbackToPath=false → null (fail closed)
++```
++
++### 3.3 Key Concept: Dual Identity
++
++The project maintains **two separate identity concepts**:
++
++| Identity Type | Purpose | Source |
++|---------------|---------|--------|
++| **projectId** | Memory storage/retrieval scope | Directory name (or manual config) |
++| **gitRemote** | Git memory capture source | Git remote URL (optional) |
++
++This separation ensures:
++- Memory is scoped by user's workspace
++- Git history (if exists) is still captured with correct provenance
++
++### 3.4 ID Generation Examples
++
++| Workspace Path | Git Status | Config | Generated projectId |
++|----------------|------------|--------|---------------------|
++| `/workspace/my-app` | No .git | default | `local/my-app` |
++| `/workspace/my-app` | Has .git, remote `user/repo` | default | `local/my-app` (gitRemote stored separately) |
++| `/workspace/my-app` | Has .git, no remote | default | `local/my-app` |
++| `/workspace/my-app` | Any | `id: "custom-name"` | `local/custom-name` |
++| `/workspace/my-app` | No .git | `fallbackToPath: false` | `null` (fail) |
++
++## 4. Implementation Plan
++
++### 4.1 Files to Modify
++
++| File | Changes |
++|------|---------|
++| `src/config/yaml-loader.ts` | Add `project` config type |
++| `memorix.example.yml` | Add `project` section example |
++| `src/project/detector.ts` | Implement new detection logic |
++| `src/cli/commands/serve-shared.ts` | Use new detection, respect `scanSubdirs` config |
++| `src/server.ts` | Pass config to detection functions |
++| `src/git/extractor.ts` | Use `gitRemote` (not projectId) for git memory |
++
++### 4.2 Detailed Changes
++
++#### 4.2.1 yaml-loader.ts - Add Project Config Type
++
++```typescript
++export interface MemorixYamlConfig {
++  // ... existing fields ...
++
++  /** Project identity configuration */
++  project?: {
++    /** Manually specify projectId (overrides auto-detection) */
++    id?: string;
++    /** Whether to scan subdirectories for git repo when root has no .git (default: false) */
++    scanSubdirs?: boolean;
++    /** Whether to use path-based projectId when no git repo found (default: true) */
++    fallbackToPath?: boolean;
++  };
++}
++```
++
++#### 4.2.2 detector.ts - New Detection Function
++
++```typescript
++/**
++ * Detect project with flexible identity strategy.
++ *
++ * ID priority:
++ *   1. Config override (memorix.yml → project.id)
++ *   2. Directory name at workspace root
++ *   3. Fallback to null if fallbackToPath=false
++ *
++ * Git remote is stored separately for git memory features.
++ */
++export function detectProjectFlexible(
++  cwd: string,
++  config?: ProjectConfigOptions
++): ProjectInfo | null {
++  const basePath = cwd ?? process.cwd();
++
++  // 1. Validate path exists and is directory
++  if (!existsSync(basePath) || !statSync(basePath).isDirectory()) {
++    return null;
++  }
++
++  // 2. Check for manual override in config
++  if (config?.manualId) {
++    return {
++      id: `local/${config.manualId}`,
++      name: config.manualId,
++      rootPath: basePath,
++      gitRemote: getGitRemoteIfExists(basePath) // Still capture git if exists
++    };
++  }
++
++  // 3. Use directory name as projectId
++  const dirName = path.basename(basePath);
++  const gitRemote = getGitRemoteIfExists(basePath);
++
++  // 4. If no git and fallbackToPath=false, fail closed
++  if (!gitRemote && config?.fallbackToPath === false) {
++    return null;
++  }
++
++  return {
++    id: `local/${dirName}`,
++    name: dirName,
++    rootPath: basePath,
++    gitRemote: gitRemote // Optional, for git memory only
++  };
++}
++
++/**
++ * Get git remote if exists, without failing if not found.
++ * Returns null if no .git or no remote configured.
++ */
++function getGitRemoteIfExists(cwd: string): string | null {
++  // ... existing git remote detection logic, return null on failure ...
++}
++```
++
++#### 4.2.3 serve-shared.ts - Respect scanSubdirs Config
++
++```typescript
++export function resolveServeProject(
++  options: ResolveServeProjectOptions,
++  deps: ResolveServeProjectDeps,
++  config?: ProjectConfigOptions
++): ServeProjectResolution {
++  let projectRoot = resolveInitialPath(options);
++  const messages: string[] = [`[memorix] Starting with cwd: ${projectRoot}`];
++
++  // NEW: Use flexible detection (directory-based)
++  let detected = deps.detectProjectFlexible(projectRoot, config);
++  if (detected) {
++    return {
++      projectRoot,
++      detectedProject: detected,
++      source: 'direct',
++      messages,
++    };
++  }
++
++  // NEW: Only scan subdirs if explicitly configured
++  if (config?.scanSubdirs === true) {
++    const subGit = deps.findGitInSubdirs(projectRoot);
++    if (subGit) {
++      // Still use ROOT directory name, not subGit directory
++      const rootName = path.basename(projectRoot);
++      detected = {
++        id: `local/${rootName}`,
++        name: rootName,
++        rootPath: projectRoot,
++        gitRemote: deps.getGitRemote(subGit) // Git from subdirectory
++      };
++      messages.push(`[memorix] Found .git in subdirectory: ${subGit}`);
++      return { projectRoot, detectedProject: detected, source: 'subdir', messages };
++    }
++  }
++
++  // ... rest of fallback logic ...
++}
++```
++
++#### 4.2.4 Git Extractor - Use gitRemote for Provenance
++
++```typescript
++// In git/extractor.ts - when creating git memory observations
++// Use project.gitRemote (not project.id) as the source identifier
++
++const gitMemoryObservation = {
++  // ...
++  projectId: project.id, // For memory scope (user's workspace)
++  source: 'git',
++  gitRemote: project.gitRemote, // NEW field - for provenance tracking
++  // ...
++};
++```
++
++### 4.3 Types Extension
++
++```typescript
++// types.ts - ProjectInfo extension
++
++export interface ProjectInfo {
++  id: string;          // Memory scope ID (directory-based)
++  name: string;        // Display name
++  rootPath: string;    // Workspace root
++  gitRemote?: string;  // Git remote URL (optional, for git memory)
++}
++```
++
++## 5. Migration and Backward Compatibility
++
++### 5.1 Existing Projects
++
++For projects already using memorix with git remote-based IDs:
++
++1. **First run with new version**: Creates alias entry mapping old ID to new ID
++2. **Existing memories**: Automatically accessible via alias resolution
++3. **No data loss**: All memories remain intact
++
++### 5.2 Alias System Integration
++
++```typescript
++// When switching to new ID strategy, register alias
++await registerAlias({
++  canonical: `local/my-app`,  // New ID
++  aliases: ['user/repo'],     // Old git remote ID
++  rootPaths: ['/workspace/my-app'],
++  gitRemote: 'https://github.com/user/repo.git'
++});
++```
++
++This ensures:
++- Search finds memories from both old and new IDs
++- Git memory continues to work with old commit records
++
++### 5.3 Configuration Defaults
++
++| Config Option | Default | Reason |
++|---------------|---------|--------|
++| `project.id` | undefined | Auto-detect from directory |
++| `project.scanSubdirs` | false | Prevent wrong binding |
++| `project.fallbackToPath` | true | Enable non-git project support |
++
++## 6. Testing Plan
++
++### 6.1 Test Cases
++
++| Test Case | Input | Expected projectId | Notes |
++|-----------|-------|-------------------|-------|
++| Non-git folder | `/workspace/my-app` | `local/my-app` | New behavior |
++| Git project | `/workspace/my-app` with remote | `local/my-app` | Git remote stored separately |
++| Git project no remote | `/workspace/my-app` with .git | `local/my-app` | Works like before |
++| Manual override | `project.id: "custom"` | `local/custom` | Config wins |
++| Disable fallback | `fallbackToPath: false` on non-git | `null` | Fail closed |
++| Subdir scan enabled | `scanSubdirs: true` with child .git | `local/parent` | Uses parent name |
++
++### 6.2 Integration Tests
++
++1. Memory storage with new projectId
++2. Search with project scope
++3. Git memory capture still works
++4. Alias resolution for old IDs
++5. Session start binding
++
++## 7. Risks and Mitigations
++
++| Risk | Mitigation |
++|------|------------|
++| Breaking existing projects | Alias system bridges old/new IDs |
++| Git memory provenance confusion | Separate gitRemote field |
++| User confusion about ID change | Clear documentation and status display |
++
++## 8. Documentation Updates
++
++Files to update:
++- `docs/ARCHITECTURE.md` - Section 5 (Project Identity Model)
++- `docs/CONFIGURATION.md` - Add project section
++- `docs/AGENT_OPERATOR_PLAYBOOK.md` - Update binding rules
++- `README.md` - Update quick start
++
++## 9. Summary
++
++This proposal introduces a **directory-based project identity** model that:
++
++1. Uses workspace root directory name as projectId (primary)
++2. Stores git remote separately for git memory features (optional)
++3. Allows manual override via configuration
++4. Disables subdirectory scanning by default
++5. Maintains backward compatibility via alias system
++
++The result: **Every workspace has a valid project identity**, regardless of git status, while git memory features remain fully functional when git exists.
+\ No newline at end of file
+diff --git a/memorix.example.yml b/memorix.example.yml
+index 5dd7578..c053994 100644
+--- a/memorix.example.yml
++++ b/memorix.example.yml
+@@ -14,6 +14,24 @@
+ #
+ # Docs: https://github.com/AVIDS2/memorix
+ 
++# ── Project Identity Configuration ─────────────────────────────
++# Control how Memorix identifies your project.
++# By default, Memorix uses the workspace root directory name as projectId.
++project:
++  # Manually specify projectId (overrides auto-detection)
++  # Example: "my-project" → projectId becomes "local/my-project"
++  # id: "my-project-name"
++
++  # Whether to scan subdirectories for git repo when root has no .git
++  # Default: false - prevents binding to wrong child repo
++  # Set to true if you want git memory from a subdirectory repo
++  scanSubdirs: false
++
++  # Whether to use directory name as projectId when no git repo found
++  # Default: true - enables non-git project support
++  # Set to false to require git for project binding (fail closed)
++  fallbackToPath: true
++
+ # ── LLM Configuration ────────────────────────────────────────
+ # Used for smart dedup, fact extraction, and memory formation.
+ # Optional — Memorix works without LLM (free heuristic mode).
+diff --git a/package-lock.json b/package-lock.json
+index 78d3df7..0112b12 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1739,6 +1739,7 @@
+       "integrity": "sha512-ilcTH/UniCkMdtexkoCN0bI7pMcJDvmQFPvuPvmEaYA/NSfFTAgdUSLAoVjaRJm7+6PvcM+q1zYOwS4wTYMF9w==",
+       "devOptional": true,
+       "license": "MIT",
++      "peer": true,
+       "dependencies": {
+         "csstype": "^3.2.2"
+       }
+@@ -2443,6 +2444,7 @@
+       "resolved": "https://registry.npmjs.org/cytoscape/-/cytoscape-3.33.1.tgz",
+       "integrity": "sha512-iJc4TwyANnOGR1OmWhsS9ayRS3s+XQ185FmuHObThD+5AeJCakAAbWv8KimMTt08xCCLNgneQwFp+JRJOr9qGQ==",
+       "license": "MIT",
++      "peer": true,
+       "engines": {
+         "node": ">=0.10"
+       }
+@@ -2764,6 +2766,7 @@
+       "dev": true,
+       "hasInstallScript": true,
+       "license": "MIT",
++      "peer": true,
+       "bin": {
+         "esbuild": "bin/esbuild"
+       },
+@@ -2896,6 +2899,7 @@
+       "resolved": "https://registry.npmjs.org/express/-/express-5.2.1.tgz",
+       "integrity": "sha512-hIS4idWWai69NezIdRt2xFVofaF4j+6INOpJlVOLDO8zXGpUVEVzIYk12UUi2JzjEzWL3IOAxcTubgz9Po0yXw==",
+       "license": "MIT",
++      "peer": true,
+       "dependencies": {
+         "accepts": "^2.0.0",
+         "body-parser": "^2.2.1",
+@@ -3327,6 +3331,7 @@
+       "resolved": "https://registry.npmjs.org/hono/-/hono-4.11.9.tgz",
+       "integrity": "sha512-Eaw2YTGM6WOxA6CXbckaEvslr2Ne4NFsKrvc0v97JD5awbmeBLO5w9Ho9L9kmKonrwF9RJlW6BxT1PVv/agBHQ==",
+       "license": "MIT",
++      "peer": true,
+       "engines": {
+         "node": ">=16.9.0"
+       }
+@@ -4703,6 +4708,7 @@
+       "integrity": "sha512-5gTmgEY/sqK6gFXLIsQNH19lWb4ebPDLA4SdLP7dsWkIXHWlG66oPuVvXSGFPppYZz8ZDZq0dYYrbHfBCVUb1Q==",
+       "dev": true,
+       "license": "MIT",
++      "peer": true,
+       "engines": {
+         "node": ">=12"
+       },
+@@ -4768,6 +4774,7 @@
+         }
+       ],
+       "license": "MIT",
++      "peer": true,
+       "dependencies": {
+         "nanoid": "^3.3.11",
+         "picocolors": "^1.1.1",
+@@ -4967,6 +4974,7 @@
+       "resolved": "https://registry.npmjs.org/react/-/react-19.2.4.tgz",
+       "integrity": "sha512-9nfp2hYpCwOjAN+8TZFGhtWEwgvWHXqESH8qT89AT/lWklpLON22Lc8pEtnpsZz7VmawabSU0gCjnj8aC0euHQ==",
+       "license": "MIT",
++      "peer": true,
+       "engines": {
+         "node": ">=0.10.0"
+       }
+@@ -6017,6 +6025,7 @@
+       "integrity": "sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==",
+       "dev": true,
+       "license": "Apache-2.0",
++      "peer": true,
+       "bin": {
+         "tsc": "bin/tsc",
+         "tsserver": "bin/tsserver"
+@@ -6172,6 +6181,7 @@
+       "integrity": "sha512-+Oxm7q9hDoLMyJOYfUYBuHQo+dkAloi33apOPP56pzj+vsdJDzr+j1NISE5pyaAuKL4A3UD34qd0lx5+kfKp2g==",
+       "dev": true,
+       "license": "MIT",
++      "peer": true,
+       "dependencies": {
+         "esbuild": "^0.25.0",
+         "fdir": "^6.4.4",
+@@ -6947,6 +6957,7 @@
+       "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.76.tgz",
+       "integrity": "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==",
+       "license": "MIT",
++      "peer": true,
+       "funding": {
+         "url": "https://github.com/sponsors/colinhacks"
+       }
+diff --git a/src/cli/commands/serve-http.ts b/src/cli/commands/serve-http.ts
+index c07f01b..cebc16b 100644
+--- a/src/cli/commands/serve-http.ts
++++ b/src/cli/commands/serve-http.ts
+@@ -46,8 +46,12 @@ export default defineCommand({
+       '@modelcontextprotocol/sdk/types.js'
+     );
+     const { createMemorixServer } = await import('../../server.js');
+-    const { findGitInSubdirs, detectProjectWithDiagnostics } = await import('../../project/detector.js');
++    const { findGitInSubdirs, detectProjectWithDiagnostics, getGitRemoteIfExists } = await import('../../project/detector.js');
++    const { getProjectConfig } = await import('../../config.js');
+     const { existsSync, readFileSync } = await import('node:fs');
++
++    // Load project config for detection behavior
++    const projectConfig = getProjectConfig();
+     const { homedir } = await import('node:os');
+     const earlyPath = await import('node:path');
+ 
+@@ -60,14 +64,14 @@ export default defineCommand({
+ 
+     // Fallback: if projectRoot has no git, try last-project-root
+     const lastRootFile = earlyPath.join(homedir(), '.memorix', 'last-project-root');
+-    const initialCheck = detectProjectWithDiagnostics(projectRoot);
++    const initialCheck = detectProjectWithDiagnostics(projectRoot, projectConfig);
+     if (!initialCheck.project && existsSync(lastRootFile)) {
+       try {
+         const lastRoot = readFileSync(lastRootFile, 'utf-8').trim();
+         if (lastRoot && existsSync(lastRoot)) {
+-          const lastCheck = detectProjectWithDiagnostics(lastRoot);
++          const lastCheck = detectProjectWithDiagnostics(lastRoot, projectConfig);
+           if (lastCheck.project) {
+-            console.error(`[memorix] No git at "${projectRoot}", restored last known project: ${lastRoot}`);
++            console.error(`[memorix] No project at "${projectRoot}", restored last known project: ${lastRoot}`);
+             projectRoot = lastRoot;
+           }
+         }
+@@ -458,9 +462,9 @@ export default defineCommand({
+     const pathModule = await import('node:path');
+     const { fileURLToPath } = await import('node:url');
+ 
+-    const detectedDashboardProject = detectProject(projectRoot);
++    const detectedDashboardProject = detectProject(projectRoot, projectConfig);
+     const defaultProject = detectedDashboardProject ?? {
+-      id: '__unresolved__',
++      id: `local/${pathModule.default.basename(projectRoot)}`,
+       name: pathModule.default.basename(projectRoot),
+       rootPath: projectRoot,
+     };
+diff --git a/src/cli/commands/serve-shared.ts b/src/cli/commands/serve-shared.ts
+index 17b21bb..49e5287 100644
+--- a/src/cli/commands/serve-shared.ts
++++ b/src/cli/commands/serve-shared.ts
+@@ -1,4 +1,5 @@
+ import type { ProjectInfo } from '../../types.js';
++import type { ProjectConfigOptions } from '../../project/detector.js';
+ 
+ export interface ResolveServeProjectOptions {
+   cwdArg?: string;
+@@ -10,9 +11,10 @@ export interface ResolveServeProjectOptions {
+ }
+ 
+ export interface ResolveServeProjectDeps {
+-  detectProject: (cwd: string) => ProjectInfo | null;
++  detectProject: (cwd: string, config?: ProjectConfigOptions) => ProjectInfo | null;
+   findGitInSubdirs: (dir: string) => string | null;
+   isSystemDirectory: (dir: string) => boolean;
++  getGitRemoteIfExists: (cwd: string) => string | null;
+ }
+ 
+ export interface ServeProjectResolution {
+@@ -23,9 +25,18 @@ export interface ServeProjectResolution {
+   error?: string;
+ }
+ 
++/**
++ * Resolve the serve project with flexible directory-based identity.
++ *
++ * Key behavior:
++ * - projectId always binds to workspace root directory name
++ * - gitRemote is detected separately for git memory features
++ * - subdirectory scanning is disabled by default (scanSubdirs config)
++ */
+ export function resolveServeProject(
+   options: ResolveServeProjectOptions,
+   deps: ResolveServeProjectDeps,
++  projectConfig?: ProjectConfigOptions,
+ ): ServeProjectResolution {
+   let projectRoot =
+     options.cwdArg ||
+@@ -35,7 +46,14 @@ export function resolveServeProject(
+ 
+   const messages: string[] = [`[memorix] Starting with cwd: ${projectRoot}`];
+ 
+-  let detected = deps.detectProject(projectRoot);
++  // Use flexible detection with config
++  const config: ProjectConfigOptions = {
++    manualId: projectConfig?.manualId,
++    scanSubdirs: projectConfig?.scanSubdirs ?? false,
++    fallbackToPath: projectConfig?.fallbackToPath ?? true,
++  };
++
++  let detected = deps.detectProject(projectRoot, config);
+   if (detected) {
+     return {
+       projectRoot,
+@@ -45,12 +63,21 @@ export function resolveServeProject(
+     };
+   }
+ 
+-  const subGit = deps.findGitInSubdirs(projectRoot);
+-  if (subGit) {
+-    projectRoot = subGit;
+-    detected = deps.detectProject(subGit);
+-    if (detected) {
++  // Only scan subdirectories if explicitly configured
++  if (config.scanSubdirs) {
++    const subGit = deps.findGitInSubdirs(projectRoot);
++    if (subGit) {
++      // Still use ROOT directory name, not subGit directory
++      const rootName = projectRoot.split(/[/\\]/).pop() || projectRoot;
++      const gitRemote = deps.getGitRemoteIfExists(subGit);
++      detected = {
++        id: `local/${rootName}`,
++        name: rootName,
++        rootPath: projectRoot,
++        gitRemote: gitRemote ?? undefined,
++      };
+       messages.push(`[memorix] Found .git in subdirectory: ${subGit}`);
++      messages.push(`[memorix] Binding to workspace root: ${projectRoot}`);
+       return {
+         projectRoot,
+         detectedProject: detected,
+@@ -66,7 +93,7 @@ export function resolveServeProject(
+     messages.push('[memorix] Fix: add --cwd to your MCP config, or use an IDE/client that exposes workspace roots.');
+ 
+     if (options.lastKnownProjectRoot) {
+-      detected = deps.detectProject(options.lastKnownProjectRoot);
++      detected = deps.detectProject(options.lastKnownProjectRoot, config);
+       if (detected) {
+         messages.push(`[memorix] Restored last known project: ${options.lastKnownProjectRoot}`);
+         return {
+@@ -78,7 +105,7 @@ export function resolveServeProject(
+       }
+     }
+ 
+-    detected = deps.detectProject(options.homeDir);
++    detected = deps.detectProject(options.homeDir, config);
+     if (detected) {
+       messages.push(`[memorix] Restored project from home directory: ${options.homeDir}`);
+       return {
+@@ -89,23 +116,26 @@ export function resolveServeProject(
+       };
+     }
+ 
+-    const homeSubGit = deps.findGitInSubdirs(options.homeDir);
+-    if (homeSubGit) {
+-      detected = deps.detectProject(homeSubGit);
+-      if (detected) {
+-        messages.push(`[memorix] Found .git in home subdirectory: ${homeSubGit}`);
+-        return {
+-          projectRoot: homeSubGit,
+-          detectedProject: detected,
+-          source: 'home-subdir',
+-          messages,
+-        };
++    // Only scan home subdirs if configured
++    if (config.scanSubdirs) {
++      const homeSubGit = deps.findGitInSubdirs(options.homeDir);
++      if (homeSubGit) {
++        detected = deps.detectProject(homeSubGit, config);
++        if (detected) {
++          messages.push(`[memorix] Found .git in home subdirectory: ${homeSubGit}`);
++          return {
++            projectRoot: homeSubGit,
++            detectedProject: detected,
++            source: 'home-subdir',
++            messages,
++          };
++        }
+       }
+     }
+   }
+ 
+-  messages.push('[memorix] Unable to establish a reliable git-backed project context.');
+-  messages.push('[memorix] Memorix now refuses to silently fall back to untracked/* in stdio mode.');
++  messages.push('[memorix] Unable to establish a project context.');
++  messages.push('[memorix] Tip: Ensure your workspace directory exists, or set project.fallbackToPath=true in memorix.yml');
+ 
+   return {
+     projectRoot,
+@@ -113,6 +143,6 @@ export function resolveServeProject(
+     source: 'unresolved',
+     messages,
+     error:
+-      'No git project could be resolved from the current workspace. Open the repo root, pass --cwd, or use an MCP client that sends workspace roots.',
++      'No project could be resolved from the current workspace. Open a valid directory, pass --cwd, or enable fallbackToPath in memorix.yml.',
+   };
+ }
+diff --git a/src/cli/commands/serve.ts b/src/cli/commands/serve.ts
+index 55426a8..e418d8d 100644
+--- a/src/cli/commands/serve.ts
++++ b/src/cli/commands/serve.ts
+@@ -21,9 +21,10 @@ export default defineCommand({
+       '@modelcontextprotocol/sdk/server/stdio.js'
+     );
+     const { createMemorixServer } = await import('../../server.js');
+-    const { detectProject, findGitInSubdirs, isSystemDirectory } = await import('../../project/detector.js');
++    const { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists } = await import('../../project/detector.js');
+     const { homedir } = await import('node:os');
+     const { resolveServeProject } = await import('./serve-shared.js');
++    const { getProjectConfig } = await import('../../config.js');
+ 
+     // Auto-exit when stdio pipe breaks (IDE closed) to prevent orphaned processes
+     process.stdin.on('end', () => {
+@@ -47,6 +48,9 @@ export default defineCommand({
+       } catch { /* ignore read errors */ }
+     }
+ 
++    // Load project config for detection behavior
++    const projectConfig = getProjectConfig();
++
+     const resolution = resolveServeProject(
+       {
+         cwdArg: args.cwd,
+@@ -56,7 +60,8 @@ export default defineCommand({
+         homeDir: homedir(),
+         lastKnownProjectRoot,
+       },
+-      { detectProject, findGitInSubdirs, isSystemDirectory },
++      { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists },
++      projectConfig,
+     );
+ 
+     for (const message of resolution.messages) {
+diff --git a/src/config.ts b/src/config.ts
+index 8d2bf4a..5bff04e 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -170,6 +170,11 @@ export function getEmbeddingDimensions(): number | null {
+ 
+ // ─── YAML-specific getters (new config sections) ────────────────────
+ 
++/** Project identity config */
++export function getProjectConfig(): NonNullable<MemorixYamlConfig['project']> {
++  return loadYamlConfig().project ?? {};
++}
++
+ /** Git-Memory pipeline config */
+ export function getGitConfig(): NonNullable<MemorixYamlConfig['git']> {
+   return loadYamlConfig().git ?? {};
+diff --git a/src/config/yaml-loader.ts b/src/config/yaml-loader.ts
+index cbdc6d1..3f4e89f 100644
+--- a/src/config/yaml-loader.ts
++++ b/src/config/yaml-loader.ts
+@@ -39,6 +39,16 @@ export interface MemorixYamlConfig {
+     dimensions?: number;
+   };
+ 
++  /** Project identity configuration */
++  project?: {
++    /** Manually specify projectId (overrides auto-detection, e.g., "my-project" → "local/my-project") */
++    id?: string;
++    /** Whether to scan subdirectories for git repo when root has no .git (default: false) */
++    scanSubdirs?: boolean;
++    /** Whether to use path-based projectId when no git repo found (default: true) */
++    fallbackToPath?: boolean;
++  };
++
+   /** Git-Memory pipeline configuration */
+   git?: {
+     /** Auto-install post-commit hook on first run (default: false) */
+@@ -162,6 +172,7 @@ export function loadYamlConfig(projectRoot?: string | null): MemorixYamlConfig {
+     // Deep merge for nested objects where both exist
+     llm: { ...userConfig.llm, ...projectConfig.llm },
+     embedding: { ...userConfig.embedding, ...projectConfig.embedding },
++    project: { ...userConfig.project, ...projectConfig.project },
+     git: { ...userConfig.git, ...projectConfig.git },
+     behavior: { ...userConfig.behavior, ...projectConfig.behavior },
+     server: { ...userConfig.server, ...projectConfig.server },
+diff --git a/src/index.ts b/src/index.ts
+index 4de25a1..a80c69d 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -19,8 +19,9 @@ async function main(): Promise<void> {
+   const { homedir } = await import('node:os');
+   const { existsSync, readFileSync } = await import('node:fs');
+   const path = await import('node:path');
+-  const { detectProject, findGitInSubdirs, isSystemDirectory } = await import('./project/detector.js');
++  const { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists } = await import('./project/detector.js');
+   const { resolveServeProject } = await import('./cli/commands/serve-shared.js');
++  const { getProjectConfig } = await import('./config.js');
+ 
+   let safeCwd: string;
+   try { safeCwd = process.cwd(); } catch { safeCwd = homedir(); }
+@@ -36,13 +37,16 @@ async function main(): Promise<void> {
+     } catch { /* ignore */ }
+   }
+ 
++  const projectConfig = getProjectConfig();
++
+   const resolution = resolveServeProject(
+     {
+       processCwd: safeCwd,
+       homeDir: homedir(),
+       lastKnownProjectRoot,
+     },
+-    { detectProject, findGitInSubdirs, isSystemDirectory },
++    { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists },
++    projectConfig,
+   );
+ 
+   for (const message of resolution.messages) {
+diff --git a/src/project/detector.ts b/src/project/detector.ts
+index 3b07d6e..24bf7d5 100644
+--- a/src/project/detector.ts
++++ b/src/project/detector.ts
+@@ -1,13 +1,15 @@
+ /**
+  * Project Detector
+  *
+- * Strict .git-based project detection.
+- * No .git = not a project. No fallbacks, no accommodations.
++ * Flexible project detection with directory-based identity.
+  *
+- * ID strategy:
+- *   - .git + remote → normalizeGitRemote(remote)  (globally unique, e.g. "user/repo")
+- *   - .git + no remote → "local/<dirname>"         (local git repo, no remote yet)
+- *   - no .git → null                               (not a project)
++ * ID strategy (revised for flexibility):
++ *   1. Config override (memorix.yml → project.id) → "local/<config-id>"
++ *   2. Directory name at workspace root → "local/<dirname>"
++ *   3. Fallback to null if fallbackToPath=false
++ *
++ * Git remote is stored separately for git memory features (optional).
++ * This ensures project identity binds to user's workspace, not child repos.
+  */
+ 
+ import { execSync } from 'node:child_process';
+@@ -15,21 +17,37 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+ import path from 'node:path';
+ import type { ProjectInfo, DetectionResult, DetectionFailure } from '../types.js';
+ 
++/** Configuration options for project detection */
++export interface ProjectConfigOptions {
++  /** Manually specify projectId (overrides auto-detection) */
++  manualId?: string;
++  /** Whether to scan subdirectories for git repo when root has no .git (default: false) */
++  scanSubdirs?: boolean;
++  /** Whether to use path-based projectId when no git repo found (default: true) */
++  fallbackToPath?: boolean;
++}
++
+ /**
+- * Detect the current project identity from Git.
+- * Returns null if no .git directory is found — caller must handle this.
++ * Detect the current project identity.
++ * Uses directory-based identity by default.
+  * @param cwd - Working directory to detect from (defaults to process.cwd())
++ * @param config - Optional configuration for detection behavior
+  */
+-export function detectProject(cwd?: string): ProjectInfo | null {
+-  return detectProjectWithDiagnostics(cwd).project;
++export function detectProject(cwd?: string, config?: ProjectConfigOptions): ProjectInfo | null {
++  return detectProjectWithDiagnostics(cwd, config).project;
+ }
+ 
+ /**
+  * Detect project with full diagnostic info.
+- * Returns both the project (if found) and a failure descriptor (if not).
+- * Callers can use failure.reason to produce actionable error messages.
++ *
++ * ID priority:
++ *   1. Config override (config.manualId) → "local/<manualId>"
++ *   2. Directory name at workspace root → "local/<dirname>"
++ *   3. null if fallbackToPath=false and no git
++ *
++ * Git remote is detected separately and stored for git memory features.
+  */
+-export function detectProjectWithDiagnostics(cwd?: string): DetectionResult {
++export function detectProjectWithDiagnostics(cwd?: string, config?: ProjectConfigOptions): DetectionResult {
+   const basePath = cwd ?? process.cwd();
+ 
+   // Check: does the path exist?
+@@ -55,32 +73,58 @@ export function detectProjectWithDiagnostics(cwd?: string): DetectionResult {
+     };
+   }
+ 
+-  // Check: git root
++  const dirName = path.basename(basePath);
++  const fallbackToPath = config?.fallbackToPath !== false; // Default true
++
++  // 1. Check for manual override in config
++  if (config?.manualId) {
++    const id = `local/${config.manualId}`;
++    const gitRemote = getGitRemoteIfExists(basePath);
++    return {
++      project: { id, name: config.manualId, rootPath: basePath, gitRemote: gitRemote ?? undefined },
++      failure: null,
++    };
++  }
++
++  // 2. Try to detect git info (optional, for git memory)
+   const gitRootResult = getGitRootWithDiagnostics(basePath);
+-  if (!gitRootResult.root) {
++  const gitRemote = gitRootResult.root ? getGitRemote(gitRootResult.root) : null;
++
++  // 3. If git root found and it's NOT the workspace root, we have a child/subdirectory git
++  //    Still use workspace root directory name as projectId, git is just for git memory
++  if (gitRootResult.root && gitRootResult.root !== basePath) {
++    // Git found in parent or child - still bind to workspace root
+     return {
+-      project: null,
+-      failure: gitRootResult.failure ?? {
+-        reason: 'no_git',
+-        path: basePath,
+-        detail: `No .git directory found in "${basePath}" or any parent directory.`,
+-      },
++      project: { id: `local/${dirName}`, name: dirName, rootPath: basePath, gitRemote: gitRemote ?? undefined },
++      failure: null,
+     };
+   }
+ 
+-  const gitRoot = gitRootResult.root;
+-  const gitRemote = getGitRemote(gitRoot);
++  // 4. Git found at workspace root - use directory name, store git remote for git memory
++  if (gitRootResult.root) {
++    return {
++      project: { id: `local/${dirName}`, name: dirName, rootPath: basePath, gitRemote: gitRemote ?? undefined },
++      failure: null,
++    };
++  }
+ 
+-  if (gitRemote) {
+-    const id = normalizeGitRemote(gitRemote);
+-    const name = id.split('/').pop() ?? path.basename(gitRoot);
+-    return { project: { id, name, gitRemote, rootPath: gitRoot }, failure: null };
++  // 5. No git found - use directory name if fallbackToPath is true
++  if (fallbackToPath) {
++    return {
++      project: { id: `local/${dirName}`, name: dirName, rootPath: basePath },
++      failure: null,
++    };
+   }
+ 
+-  // Git repo without remote — local-only project
+-  const name = path.basename(gitRoot);
+-  const id = `local/${name}`;
+-  return { project: { id, name, rootPath: gitRoot }, failure: null };
++  // 6. No git and fallbackToPath=false - fail closed
++  return {
++    project: null,
++    failure: {
++      reason: 'no_git',
++      path: basePath,
++      detail: `No .git directory found in "${basePath}" and fallbackToPath is disabled.`,
++    },
++  };
+ }
+ 
+ /**
+@@ -150,6 +194,15 @@ function getGitRootWithDiagnostics(cwd: string): { root: string | null; failure:
+   }
+ }
+ 
++/**
++ * Get the Git remote URL for the given directory (wrapper that never throws).
++ * Returns null if not a git repository or no remote configured.
++ * Use this when you want optional git info without affecting the main detection logic.
++ */
++export function getGitRemoteIfExists(cwd: string): string | null {
++  return getGitRemote(cwd);
++}
++
+ /**
+  * Get the Git remote URL for the given directory.
+  * Returns null if not a git repository or no remote configured.
+diff --git a/src/server.ts b/src/server.ts
+index c7f5cae..0028ce0 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -31,6 +31,7 @@ import { createAutoRelations } from './memory/auto-relations.js';
+ import { extractEntities } from './memory/entity-extractor.js';
+ import { compactSearch, compactTimeline, compactDetail } from './compact/engine.js';
+ import { detectProject } from './project/detector.js';
++import { getProjectConfig } from './config.js';
+ import { registerAlias, initAliasRegistry, resolveAliases, autoMergeByBaseName } from './project/aliases.js';
+ import { getProjectDataDir } from './store/persistence.js';
+ import type { ObservationType, RuleSource, AgentTarget, MCPServerEntry } from './types.js';
+@@ -196,10 +197,17 @@ export async function createMemorixServer(
+   switchProject: (newCwd: string) => Promise<boolean>;
+   isExplicitlyBound: () => boolean;
+ }> {
+-  // Detect current project — strict .git-based detection
++  // Detect current project — flexible directory-based detection
+   const allowUntrackedFallback = options.allowUntrackedFallback ?? true;
+   const deferProjectInitUntilBound = options.deferProjectInitUntilBound ?? false;
+-  const detectedProject = detectProject(cwd);
++
++  // Load project config for detection behavior
++  const projectConfig = getProjectConfig();
++  const detectedProject = detectProject(cwd, {
++    manualId: projectConfig.id,
++    scanSubdirs: projectConfig.scanSubdirs,
++    fallbackToPath: projectConfig.fallbackToPath,
++  });
+   let rawProject: import('./types.js').ProjectInfo;
+   let projectResolved = true;
+   let projectResolutionError: string | null = null;
+@@ -211,16 +219,16 @@ export async function createMemorixServer(
+     const name = (await import('node:path')).basename(basePath) || 'unknown';
+     projectResolved = false;
+     projectResolutionError =
+-      `No git project could be resolved from "${basePath}". ` +
+-      'This client did not provide a usable workspace root, so project-scoped tools are disabled until a git-backed project is detected.';
++      `No project could be resolved from "${basePath}". ` +
++      'This client did not provide a usable workspace root. ' +
++      'Set project.fallbackToPath=true in memorix.yml to enable non-git project support.';
+     rawProject = allowUntrackedFallback
+-      ? { id: `untracked/${name}`, name, rootPath: basePath }
++      ? { id: `local/${name}`, name, rootPath: basePath }
+       : { id: '__unresolved__', name, rootPath: basePath };
+     if (!allowUntrackedFallback && !deferProjectInitUntilBound) {
+       console.error(`[memorix] WARNING: ${projectResolutionError}`);
+     } else if (allowUntrackedFallback) {
+-      console.error(`[memorix] WARNING: No .git found in "${basePath}" - project isolation degraded`);
+-      console.error(`[memorix] Run "git init" in your project for proper isolation.`);
++      console.error(`[memorix] Project bound to workspace directory: "${basePath}"`);
+     }
+   }
+ 
+@@ -2605,7 +2613,8 @@ export async function createMemorixServer(
+       if (explicitRoot && typeof explicitRoot === 'string') {
+         let bound = await switchProject(explicitRoot);
+         // Fallback: workspace root may contain a git project in a subdirectory
+-        if (!bound) {
++        // Only scan subdirs if configured
++        if (!bound && getProjectConfig().scanSubdirs) {
+           const { findGitInSubdirs } = await import('./project/detector.js');
+           const subGit = findGitInSubdirs(explicitRoot);
+           if (subGit) {
+@@ -2617,7 +2626,12 @@ export async function createMemorixServer(
+         // We must NOT treat "different valid repo at a different path" as a no-op success.
+         if (!bound && projectResolved) {
+           const { detectProjectWithDiagnostics: diagnose } = await import('./project/detector.js');
+-          const diag = diagnose(explicitRoot);
++          const config = getProjectConfig();
++          const diag = diagnose(explicitRoot, {
++            manualId: config.id,
++            scanSubdirs: config.scanSubdirs,
++            fallbackToPath: config.fallbackToPath,
++          });
+           if (diag.project) {
+             const { registerAlias: regAlias } = await import('./project/aliases.js');
+             const resolvedCanonical = await regAlias(diag.project);
+@@ -2629,28 +2643,39 @@ export async function createMemorixServer(
+           }
+         }
+         if (!bound) {
+-          // Explicit projectRoot was provided but no git repo found.
+-          // ALWAYS fail closed — never silently fall back to a previously bound project.
++          // Explicit projectRoot was provided but detection failed.
++          // Check if fallback is enabled
++          const config = getProjectConfig();
+           const { detectProjectWithDiagnostics: diagnose } = await import('./project/detector.js');
+-          const diag = diagnose(explicitRoot);
+-          const failureDetail = diag.failure
+-            ? `\nDiagnostic: [${diag.failure.reason}] ${diag.failure.detail}`
+-            : '';
+-          const hint = projectResolved
+-            ? `The session was previously bound to "${project.name}" (${project.id}), but the explicitly requested path has no git repo. Refusing to silently reuse the old binding.`
+-            : 'No project is currently bound to this session.';
+-          return {
+-            content: [{
+-              type: 'text' as const,
+-              text:
+-                `Cannot bind session to project.\n` +
+-                `No git repository found at "${explicitRoot}".${failureDetail}\n` +
+-                `${hint}\n\n` +
+-                'Ensure the path points to a directory containing a .git folder (or a subdirectory of one). ' +
+-                'Run "git init" in your project root if needed.',
+-            }],
+-            isError: true as const,
+-          };
++          const diag = diagnose(explicitRoot, {
++            manualId: config.id,
++            scanSubdirs: config.scanSubdirs,
++            fallbackToPath: config.fallbackToPath,
++          });
++          if (diag.project) {
++            // With new flexible detection, this should succeed
++            bound = await switchProject(explicitRoot);
++          }
++          if (!bound) {
++            const failureDetail = diag.failure
++              ? `\nDiagnostic: [${diag.failure.reason}] ${diag.failure.detail}`
++              : '';
++            const hint = projectResolved
++              ? `The session was previously bound to "${project.name}" (${project.id}), but the explicitly requested path could not be bound.`
++              : 'No project is currently bound to this session.';
++            return {
++              content: [{
++                type: 'text' as const,
++                text:
++                  `Cannot bind session to project.\n` +
++                  `Path: "${explicitRoot}".${failureDetail}\n` +
++                  `${hint}\n\n` +
++                  'Ensure the path points to a valid directory. ' +
++                  'Set project.fallbackToPath=true in memorix.yml for non-git project support.',
++              }],
++              isError: true as const,
++            };
++          }
+         }
+         // Bound successfully — mark as explicitly bound so roots won't override
+         explicitProjectBound = true;
+@@ -3544,7 +3569,12 @@ export async function createMemorixServer(
+   // Updates all mutable state; tool closures automatically pick up new values.
+   const switchProject = async (newCwd: string): Promise<boolean> => {
+     const { detectProjectWithDiagnostics } = await import('./project/detector.js');
+-    const result = detectProjectWithDiagnostics(newCwd);
++    const config = getProjectConfig();
++    const result = detectProjectWithDiagnostics(newCwd, {
++      manualId: config.id,
++      scanSubdirs: config.scanSubdirs,
++      fallbackToPath: config.fallbackToPath,
++    });
+     if (!result.project) {
+       if (result.failure) {
+         console.error(`[memorix] Project detection failed for "${newCwd}": [${result.failure.reason}] ${result.failure.detail}`);
+diff --git a/tests/cli/serve.test.ts b/tests/cli/serve.test.ts
+index ca548d1..2148013 100644
+--- a/tests/cli/serve.test.ts
++++ b/tests/cli/serve.test.ts
+@@ -3,51 +3,76 @@ import { describe, expect, it } from 'vitest';
+ import { resolveServeProject } from '../../src/cli/commands/serve-shared.js';
+ import type { ProjectInfo } from '../../src/types.js';
+ 
+-function makeProject(id: string, rootPath: string): ProjectInfo {
++function makeProject(id: string, rootPath: string, gitRemote?: string): ProjectInfo {
+   return {
+     id,
+     name: id.split('/').pop() || id,
+     rootPath,
++    gitRemote,
+   };
+ }
+ 
+ describe('serve-shared', () => {
+-  it('resolves a direct git-backed project from cwd', () => {
++  it('resolves a direct project from cwd (directory-based identity)', () => {
+     const result = resolveServeProject(
+       {
+         processCwd: 'E:/repo',
+         homeDir: 'C:/Users/tester',
+       },
+       {
+-        detectProject: (cwd) => (cwd === 'E:/repo' ? makeProject('AVIDS2/repo', cwd) : null),
++        detectProject: (cwd) => (cwd === 'E:/repo' ? makeProject('local/repo', cwd) : null),
+         findGitInSubdirs: () => null,
+         isSystemDirectory: () => false,
++        getGitRemoteIfExists: () => null,
+       },
+     );
+ 
+-    expect(result.detectedProject?.id).toBe('AVIDS2/repo');
++    expect(result.detectedProject?.id).toBe('local/repo');
+     expect(result.source).toBe('direct');
+     expect(result.error).toBeUndefined();
+   });
+ 
+-  it('resolves the first git-backed subdirectory when workspace root itself is not a repo', () => {
++  it('resolves the first subdirectory when scanSubdirs is enabled', () => {
+     const result = resolveServeProject(
+       {
+         processCwd: 'E:/workspace',
+         homeDir: 'C:/Users/tester',
+       },
+       {
+-        detectProject: (cwd) => (cwd === 'E:/workspace/app' ? makeProject('AVIDS2/app', cwd) : null),
++        detectProject: (cwd) => (cwd === 'E:/workspace/app' ? makeProject('local/app', cwd) : null),
+         findGitInSubdirs: (cwd) => (cwd === 'E:/workspace' ? 'E:/workspace/app' : null),
+         isSystemDirectory: () => false,
++        getGitRemoteIfExists: () => null,
+       },
++      { scanSubdirs: true }, // Enable subdir scanning
+     );
+ 
+-    expect(result.detectedProject?.id).toBe('AVIDS2/app');
+-    expect(result.projectRoot).toBe('E:/workspace/app');
++    // With new logic, projectId should be based on workspace root, not subdir
++    expect(result.detectedProject?.id).toBe('local/workspace');
++    expect(result.projectRoot).toBe('E:/workspace');
+     expect(result.source).toBe('subdir');
+   });
+ 
++  it('does NOT scan subdirs by default (scanSubdirs: false)', () => {
++    const result = resolveServeProject(
++      {
++        processCwd: 'E:/workspace',
++        homeDir: 'C:/Users/tester',
++      },
++      {
++        detectProject: (cwd) => (cwd === 'E:/workspace/app' ? makeProject('local/app', cwd) : null),
++        findGitInSubdirs: (cwd) => (cwd === 'E:/workspace' ? 'E:/workspace/app' : null),
++        isSystemDirectory: () => false,
++        getGitRemoteIfExists: () => null,
++      },
++      // No scanSubdirs config - defaults to false
++    );
++
++    // Should fail because root has no git and subdir scanning is disabled
++    expect(result.detectedProject).toBeNull();
++    expect(result.source).toBe('unresolved');
++  });
++
+   it('restores the last known project when launched from a system directory', () => {
+     const result = resolveServeProject(
+       {
+@@ -56,18 +81,19 @@ describe('serve-shared', () => {
+         lastKnownProjectRoot: 'E:/repo',
+       },
+       {
+-        detectProject: (cwd) => (cwd === 'E:/repo' ? makeProject('AVIDS2/repo', cwd) : null),
++        detectProject: (cwd) => (cwd === 'E:/repo' ? makeProject('local/repo', cwd) : null),
+         findGitInSubdirs: () => null,
+         isSystemDirectory: (cwd) => cwd.includes('System32'),
++        getGitRemoteIfExists: () => null,
+       },
+     );
+ 
+-    expect(result.detectedProject?.id).toBe('AVIDS2/repo');
++    expect(result.detectedProject?.id).toBe('local/repo');
+     expect(result.projectRoot).toBe('E:/repo');
+     expect(result.source).toBe('last-known');
+   });
+ 
+-  it('fails fast instead of falling back to untracked/* when no reliable project can be found', () => {
++  it('fails when fallbackToPath is false and no project found', () => {
+     const result = resolveServeProject(
+       {
+         processCwd: 'E:/tools/CockpitTools',
+@@ -77,16 +103,41 @@ describe('serve-shared', () => {
+         detectProject: () => null,
+         findGitInSubdirs: () => null,
+         isSystemDirectory: () => false,
++        getGitRemoteIfExists: () => null,
+       },
++      { fallbackToPath: false }, // Disable fallback
+     );
+ 
+     expect(result.detectedProject).toBeNull();
+     expect(result.source).toBe('unresolved');
+-    expect(result.error).toContain('No git project could be resolved');
+-    expect(result.messages.join('\n')).toContain('refuses to silently fall back');
++    expect(result.error).toContain('No project could be resolved');
++  });
++
++  it('succeeds with fallbackToPath true (default) even without git', () => {
++    const result = resolveServeProject(
++      {
++        processCwd: 'E:/tools/MyProject',
++        homeDir: 'C:/Users/tester',
++      },
++      {
++        detectProject: (cwd, config) => {
++          // Simulate new behavior: use directory name when fallbackToPath is true
++          if (config?.fallbackToPath !== false) {
++            return makeProject('local/MyProject', cwd);
++          }
++          return null;
++        },
++        findGitInSubdirs: () => null,
++        isSystemDirectory: () => false,
++        getGitRemoteIfExists: () => null,
++      },
++    );
++
++    expect(result.detectedProject?.id).toBe('local/MyProject');
++    expect(result.source).toBe('direct');
+   });
+ 
+-  it('fails fast for system directories when neither last-known nor home scan yields a repo', () => {
++  it('fails for system directories when neither last-known nor home scan yields a project', () => {
+     const result = resolveServeProject(
+       {
+         processCwd: 'C:/Windows/System32',
+@@ -96,11 +147,13 @@ describe('serve-shared', () => {
+         detectProject: () => null,
+         findGitInSubdirs: () => null,
+         isSystemDirectory: (cwd) => cwd.includes('System32'),
++        getGitRemoteIfExists: () => null,
+       },
++      { fallbackToPath: false },
+     );
+ 
+     expect(result.detectedProject).toBeNull();
+-    expect(result.error).toContain('No git project could be resolved');
++    expect(result.error).toContain('No project could be resolved');
+     expect(result.messages.join('\n')).toContain('System directory detected');
+   });
+-});
++});
+\ No newline at end of file
+diff --git a/tests/project/detector.test.ts b/tests/project/detector.test.ts
+index 23d3454..da50e43 100644
+--- a/tests/project/detector.test.ts
++++ b/tests/project/detector.test.ts
+@@ -1,11 +1,13 @@
+ /**
+  * Project Detector Tests
+  *
+- * Strict .git-based detection: no .git = null.
++ * Flexible directory-based identity: projectId = directory name
++ * Git remote is detected separately for git memory features
+  */
+ 
+ import { describe, it, expect } from 'vitest';
+-import { detectProject } from '../../src/project/detector.js';
++import { detectProject, detectProjectWithDiagnostics } from '../../src/project/detector.js';
++import type { ProjectConfigOptions } from '../../src/project/detector.js';
+ 
+ describe('Project Detector', () => {
+   it('should detect current project (this repo has .git)', () => {
+@@ -14,6 +16,8 @@ describe('Project Detector', () => {
+     expect(project!.id).toBeTruthy();
+     expect(project!.name).toBeTruthy();
+     expect(project!.rootPath).toBeTruthy();
++    // With new logic, projectId should be based on directory name
++    expect(project!.id.startsWith('local/')).toBe(true);
+   }, 30_000);
+ 
+   it('should detect project from a specific directory with .git', () => {
+@@ -21,19 +25,71 @@ describe('Project Detector', () => {
+     expect(project).not.toBeNull();
+     // Normalize path separators for cross-platform compatibility
+     expect(project!.rootPath.replace(/\\/g, '/')).toBe(process.cwd().replace(/\\/g, '/'));
++    // With new logic, projectId should be based on directory name
++    expect(project!.id.startsWith('local/')).toBe(true);
+   }, 30_000);
+ 
+-  it('should return null for non-git directories', () => {
+-    const project = detectProject('/tmp');
++  it('should return project with directory name for non-git directories (fallbackToPath default)', async () => {
++    const { mkdtempSync } = await import('node:fs');
++    const { tmpdir } = await import('node:os');
++    const { join } = await import('node:path');
++    const tempDir = mkdtempSync(join(tmpdir(), 'memorix-test-'));
++    const project = detectProject(tempDir);
++    expect(project).not.toBeNull();
++    expect(project!.id.startsWith('local/')).toBe(true);
++    expect(project!.gitRemote).toBeUndefined(); // No git remote
++  });
++
++  it('should return null for non-git directories when fallbackToPath is false', async () => {
++    const { mkdtempSync } = await import('node:fs');
++    const { tmpdir } = await import('node:os');
++    const { join } = await import('node:path');
++    const tempDir = mkdtempSync(join(tmpdir(), 'memorix-test-'));
++    const config: ProjectConfigOptions = { fallbackToPath: false };
++    const project = detectProject(tempDir, config);
+     expect(project).toBeNull();
+   });
+ 
+-  it('should return null for empty directories (no .git)', async () => {
++  it('should use manual ID when configured', async () => {
++    const { mkdtempSync } = await import('node:fs');
++    const { tmpdir } = await import('node:os');
++    const { join } = await import('node:path');
++    const tempDir = mkdtempSync(join(tmpdir(), 'memorix-test-'));
++    const config: ProjectConfigOptions = { manualId: 'my-custom-project' };
++    const project = detectProject(tempDir, config);
++    expect(project).not.toBeNull();
++    expect(project!.id).toBe('local/my-custom-project');
++    expect(project!.name).toBe('my-custom-project');
++  });
++
++  it('should return null for empty directories when fallbackToPath is false', async () => {
+     const { mkdtempSync } = await import('node:fs');
+     const { tmpdir } = await import('node:os');
+     const { join } = await import('node:path');
+     const emptyDir = mkdtempSync(join(tmpdir(), 'memorix-test-'));
+-    const project = detectProject(emptyDir);
++    const config: ProjectConfigOptions = { fallbackToPath: false };
++    const project = detectProject(emptyDir, config);
+     expect(project).toBeNull();
+   }, 30_000);
+-});
++
++  it('should return project with directory name for empty directories (fallbackToPath default)', async () => {
++    const { mkdtempSync, rmdirSync } = await import('node:fs');
++    const { tmpdir } = await import('node:os');
++    const { join, basename } = await import('node:path');
++    const emptyDir = mkdtempSync(join(tmpdir(), 'memorix-test-'));
++    const project = detectProject(emptyDir);
++    expect(project).not.toBeNull();
++    const dirName = basename(emptyDir);
++    expect(project!.id).toBe(`local/${dirName}`);
++    expect(project!.name).toBe(dirName);
++    rmdirSync(emptyDir);
++  }, 30_000);
++
++  it('detectProjectWithDiagnostics should provide failure info for invalid path', () => {
++    const config: ProjectConfigOptions = { fallbackToPath: false };
++    const result = detectProjectWithDiagnostics('/nonexistent-test-path-12345', config);
++    expect(result.project).toBeNull();
++    expect(result.failure).not.toBeNull();
++    expect(result.failure!.reason).toBe('path_not_found');
++  });
++});
+\ No newline at end of file

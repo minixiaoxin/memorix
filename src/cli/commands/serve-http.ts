@@ -46,8 +46,12 @@ export default defineCommand({
       '@modelcontextprotocol/sdk/types.js'
     );
     const { createMemorixServer } = await import('../../server.js');
-    const { findGitInSubdirs, detectProjectWithDiagnostics } = await import('../../project/detector.js');
+    const { findGitInSubdirs, detectProjectWithDiagnostics, getGitRemoteIfExists } = await import('../../project/detector.js');
+    const { getProjectConfig } = await import('../../config.js');
     const { existsSync, readFileSync } = await import('node:fs');
+
+    // Load project config for detection behavior
+    const projectConfig = getProjectConfig();
     const { homedir } = await import('node:os');
     const earlyPath = await import('node:path');
 
@@ -60,14 +64,14 @@ export default defineCommand({
 
     // Fallback: if projectRoot has no git, try last-project-root
     const lastRootFile = earlyPath.join(homedir(), '.memorix', 'last-project-root');
-    const initialCheck = detectProjectWithDiagnostics(projectRoot);
+    const initialCheck = detectProjectWithDiagnostics(projectRoot, projectConfig);
     if (!initialCheck.project && existsSync(lastRootFile)) {
       try {
         const lastRoot = readFileSync(lastRootFile, 'utf-8').trim();
         if (lastRoot && existsSync(lastRoot)) {
-          const lastCheck = detectProjectWithDiagnostics(lastRoot);
+          const lastCheck = detectProjectWithDiagnostics(lastRoot, projectConfig);
           if (lastCheck.project) {
-            console.error(`[memorix] No git at "${projectRoot}", restored last known project: ${lastRoot}`);
+            console.error(`[memorix] No project at "${projectRoot}", restored last known project: ${lastRoot}`);
             projectRoot = lastRoot;
           }
         }
@@ -458,9 +462,9 @@ export default defineCommand({
     const pathModule = await import('node:path');
     const { fileURLToPath } = await import('node:url');
 
-    const detectedDashboardProject = detectProject(projectRoot);
+    const detectedDashboardProject = detectProject(projectRoot, projectConfig);
     const defaultProject = detectedDashboardProject ?? {
-      id: '__unresolved__',
+      id: `local/${pathModule.default.basename(projectRoot)}`,
       name: pathModule.default.basename(projectRoot),
       rootPath: projectRoot,
     };

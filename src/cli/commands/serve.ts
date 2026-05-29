@@ -21,9 +21,10 @@ export default defineCommand({
       '@modelcontextprotocol/sdk/server/stdio.js'
     );
     const { createMemorixServer } = await import('../../server.js');
-    const { detectProject, findGitInSubdirs, isSystemDirectory } = await import('../../project/detector.js');
+    const { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists } = await import('../../project/detector.js');
     const { homedir } = await import('node:os');
     const { resolveServeProject } = await import('./serve-shared.js');
+    const { getProjectConfig } = await import('../../config.js');
 
     // Auto-exit when stdio pipe breaks (IDE closed) to prevent orphaned processes
     process.stdin.on('end', () => {
@@ -47,6 +48,9 @@ export default defineCommand({
       } catch { /* ignore read errors */ }
     }
 
+    // Load project config for detection behavior
+    const projectConfig = getProjectConfig();
+
     const resolution = resolveServeProject(
       {
         cwdArg: args.cwd,
@@ -56,7 +60,8 @@ export default defineCommand({
         homeDir: homedir(),
         lastKnownProjectRoot,
       },
-      { detectProject, findGitInSubdirs, isSystemDirectory },
+      { detectProject, findGitInSubdirs, isSystemDirectory, getGitRemoteIfExists },
+      projectConfig,
     );
 
     for (const message of resolution.messages) {
